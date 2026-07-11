@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.concurrency import run_in_threadpool
@@ -28,7 +28,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent import RECURSION_LIMIT, build_agent, log_turn
 from app.guardrails import (
-    MAX_MESSAGE_LENGTH,
     check_daily_cap,
     check_input,
     is_greeting,
@@ -56,8 +55,13 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > MAX_BODY_BYTES:
-            return JSONResponse({"detail": "Payload too large"}, status_code=413)
+        if content_length is not None:
+            try:
+                parsed_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"detail": "Invalid Content-Length header"}, status_code=400)
+            if parsed_length > MAX_BODY_BYTES:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
         return await call_next(request)
 
 
@@ -77,7 +81,7 @@ def _parse_allowed_origins() -> list[str]:
 
 class Message(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(max_length=MAX_MESSAGE_LENGTH)
+    content: str
 
 
 class ChatRequest(BaseModel):

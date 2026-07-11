@@ -72,6 +72,19 @@ def test_oversized_payload_rejected(client):
     assert resp.status_code == 413
 
 
+def test_malformed_content_length_returns_400_not_500(client):
+    app.dependency_overrides[get_agent] = lambda: _FakeAgent()
+    body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    resp = client.post(
+        "/chat",
+        content=body,
+        headers={"Content-Type": "application/json", "Content-Length": "not-a-number"},
+    )
+
+    assert resp.status_code == 400
+
+
 def test_small_payload_not_rejected_by_size_cap(client):
     # A well-under-cap request should not be rejected for size (may still
     # take other paths, e.g. greeting fast path) — asserts we're not too

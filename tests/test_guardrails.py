@@ -113,6 +113,47 @@ def test_clean_message_passes():
     assert result.ok is True
 
 
+def test_stale_profane_old_turn_clean_newest_passes():
+    history = [
+        _msg("user", "you are a fucking idiot"),
+        _msg("assistant", "Let's keep things civil."),
+        _msg("user", "what did he work on at Acme?"),
+    ]
+    result = guardrails.check_input(history)
+    assert result.ok is True
+
+
+def test_profane_newest_message_rejected():
+    history = [
+        _msg("user", "what did he work on at Acme?"),
+        _msg("assistant", "He worked on several projects."),
+        _msg("user", "you are a fucking idiot"),
+    ]
+    result = guardrails.check_input(history)
+    assert result.ok is False
+    assert result.reason == "profanity"
+
+
+def test_blank_old_turn_clean_newest_passes():
+    history = [
+        _msg("user", "   "),
+        _msg("assistant", "Could you rephrase that?"),
+        _msg("user", "what did he work on at Acme?"),
+    ]
+    result = guardrails.check_input(history)
+    assert result.ok is True
+
+
+def test_blank_newest_message_rejected():
+    history = [
+        _msg("user", "what did he work on at Acme?"),
+        _msg("assistant", "He worked on several projects."),
+        _msg("user", "   "),
+    ]
+    result = guardrails.check_input(history)
+    assert result.ok is False
+
+
 # --- greeting fast path ---------------------------------------------------
 
 

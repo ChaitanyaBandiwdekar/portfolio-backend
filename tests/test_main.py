@@ -123,6 +123,21 @@ def test_guardrail_rejection_zero_llm_calls(client):
     assert fake.calls == 0
 
 
+def test_oversize_message_rejected_via_guardrails_sse(client):
+    # Field(max_length=...) must not 422 this before check_input runs — the
+    # SSE canned-response contract must stay uniform for guardrail rejections.
+    fake = FakeAgent(events=[])
+    _override_agent(fake)
+    oversize = "x" * (guardrails_module.MAX_MESSAGE_LENGTH + 1)
+
+    resp = client.post("/chat", json=_chat_body(oversize))
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert [e["type"] for e in events] == ["token", "done"]
+    assert fake.calls == 0
+
+
 def test_empty_messages_rejected(client):
     fake = FakeAgent(events=[])
     _override_agent(fake)

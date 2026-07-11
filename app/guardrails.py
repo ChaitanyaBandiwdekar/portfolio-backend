@@ -49,15 +49,15 @@ def _reject(reason: str, response: str = CANNED_INVALID_RESPONSE) -> GuardrailRe
 
 def check_input(messages: list[dict[str, str]]) -> GuardrailResult:
     """Validate and clean incoming chat history. Check order matters:
-    shape/empty -> length caps -> history truncation -> control-char strip
-    -> profanity."""
+    shape -> length caps -> history truncation -> control-char strip ->
+    empty/blank -> profanity. Blank and profanity rejection only look at the
+    newest user message — stale profane or blank turns already sitting in
+    client-held history must not reject an otherwise-clean new message."""
     if not isinstance(messages, list) or not messages:
         return _reject("empty")
 
     for msg in messages:
         if not isinstance(msg, dict) or not isinstance(msg.get("content"), str):
-            return _reject("empty")
-        if not msg["content"].strip():
             return _reject("empty")
 
     for msg in messages:
@@ -66,17 +66,16 @@ def check_input(messages: list[dict[str, str]]) -> GuardrailResult:
 
     messages = messages[-MAX_HISTORY:]
 
-    cleaned = []
-    for msg in messages:
-        stripped = _strip_control_chars(msg["content"])
-        if not stripped.strip():
-            return _reject("empty")
-        cleaned.append({**msg, "content": stripped})
-    messages = cleaned
+    messages = [{**msg, "content": _strip_control_chars(msg["content"])} for msg in messages]
 
-    for msg in messages:
-        if profanity.contains_profanity(msg["content"]):
-            return _reject("profanity", CANNED_PROFANITY_RESPONSE)
+    user_messages = [msg for msg in messages if msg["role"] == "user"]
+    newest = user_messages[-1] if user_messages else messages[-1]
+
+    if not newest["content"].strip():
+        return _reject("empty")
+
+    if profanity.contains_profanity(newest["content"]):
+        return _reject("profanity", CANNED_PROFANITY_RESPONSE)
 
     return GuardrailResult(ok=True, messages=messages)
 
