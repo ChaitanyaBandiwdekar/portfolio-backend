@@ -6,13 +6,15 @@ Nothing else in this codebase should import langchain_google_genai.
 import math
 import os
 
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 _EMBED_MODEL = "models/gemini-embedding-001"
 _DIMS = 768
+_CHAT_MODEL = "gemini-2.5-flash"
 
 _doc_embedder: GoogleGenerativeAIEmbeddings | None = None
 _query_embedder: GoogleGenerativeAIEmbeddings | None = None
+_chat_model: ChatGoogleGenerativeAI | None = None
 
 
 def _require_api_key() -> str:
@@ -51,6 +53,15 @@ def _get_query_embedder() -> GoogleGenerativeAIEmbeddings:
             task_type="RETRIEVAL_QUERY",
         )
     return _query_embedder
+
+
+def get_chat_model() -> ChatGoogleGenerativeAI:
+    """Lazily construct the chat model used by the agent (app/agent.py)."""
+    global _chat_model
+    if _chat_model is None:
+        _require_api_key()
+        _chat_model = ChatGoogleGenerativeAI(model=_CHAT_MODEL)
+    return _chat_model
 
 
 def embed_documents(texts: list[str]) -> list[list[float]]:
