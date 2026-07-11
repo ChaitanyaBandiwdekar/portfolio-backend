@@ -201,6 +201,82 @@ def test_ingest_docs_reads_docs_dir_and_calls_ingest_file(monkeypatch, tmp_path)
     assert len(fake_client.store) == 2
 
 
+# --- Retry / grouping (embed_chunks, _embed_with_retry) ---------------------
+
+
+def test_embed_with_retry_succeeds_after_429s_with_backoff(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky_embed(texts):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: quota")
+        return [[1.0, 0.0]] * len(texts)
+
+    sleeps = []
+    monkeypatch.setattr(ingest.llm, "embed_documents", flaky_embed)
+    monkeypatch.setattr(ingest.time, "sleep", sleeps.append)
+
+    result = ingest._embed_with_retry(["a", "b"])
+
+    assert result == [[1.0, 0.0], [1.0, 0.0]]
+    assert calls["n"] == 3
+    assert sleeps == [1.0, 2.0]  # exponential backoff between retries
+
+
+def test_embed_with_retry_raises_when_retries_exhausted(monkeypatch):
+    def always_429(texts):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota")
+
+    monkeypatch.setattr(ingest.llm, "embed_documents", always_429)
+    monkeypatch.setattr(ingest.time, "sleep", lambda s: None)
+
+    try:
+        ingest._embed_with_retry(["a"])
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "429" in str(exc)
+
+
+def test_embed_with_retry_reraises_non_429_immediately(monkeypatch):
+    calls = {"n": 0}
+
+    def broken_embed(texts):
+        calls["n"] += 1
+        raise ValueError("bad request")
+
+    sleeps = []
+    monkeypatch.setattr(ingest.llm, "embed_documents", broken_embed)
+    monkeypatch.setattr(ingest.time, "sleep", sleeps.append)
+
+    try:
+        ingest.embed_chunks(["a"])
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    assert calls["n"] == 1  # no retry for non-rate-limit errors
+    assert sleeps == []
+
+
+def test_embed_chunks_groups_of_five_with_inter_group_sleeps(monkeypatch):
+    groups = []
+
+    def record_embed(texts):
+        groups.append(list(texts))
+        return [[1.0, 0.0]] * len(texts)
+
+    sleeps = []
+    monkeypatch.setattr(ingest.llm, "embed_documents", record_embed)
+    monkeypatch.setattr(ingest.time, "sleep", sleeps.append)
+
+    texts = [f"t{i}" for i in range(12)]
+    vectors = ingest.embed_chunks(texts)
+
+    assert len(vectors) == 12
+    assert [len(g) for g in groups] == [5, 5, 2]
+    assert sleeps == [ingest.EMBED_SLEEP_SECONDS] * 2  # between groups, not after last
+
+
 # --- llm.py embedding wrapper: L2 normalization -----------------------------
 
 
