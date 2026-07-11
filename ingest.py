@@ -5,7 +5,6 @@ Usage: python ingest.py
 
 import hashlib
 import logging
-import os
 import time
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from langchain_text_splitters import (
 from langsmith import traceable
 
 import app.llm as llm
+from app.supabase_client import get_supabase_client
 
 load_dotenv()
 
@@ -29,8 +29,6 @@ EMBED_SLEEP_SECONDS = 1.0
 MAX_RETRIES = 5
 
 logger = logging.getLogger(__name__)
-
-_supabase_client = None
 
 
 # --- Pure functions (no network calls) -------------------------------------
@@ -91,17 +89,6 @@ def title_from_markdown(text: str) -> str | None:
 
 
 # --- Network-touching functions ---------------------------------------------
-
-
-def get_supabase_client():
-    global _supabase_client
-    if _supabase_client is None:
-        from supabase import create_client
-
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_SERVICE_KEY"]
-        _supabase_client = create_client(url, key)
-    return _supabase_client
 
 
 def _embed_with_retry(texts: list[str]) -> list[list[float]]:
