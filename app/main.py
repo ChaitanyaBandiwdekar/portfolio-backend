@@ -11,17 +11,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent import RECURSION_LIMIT, build_agent, log_turn
 from app.guardrails import (
@@ -44,6 +47,33 @@ GENERIC_ERROR_MESSAGE = "Something went wrong on my end. Please try again."
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+MAX_BODY_BYTES = 16 * 1024
+
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Rejects requests whose declared Content-Length exceeds the cap.
+    Header check only — no chunked-body accounting."""
+
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > MAX_BODY_BYTES:
+            return JSONResponse({"detail": "Payload too large"}, status_code=413)
+        return await call_next(request)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+
+def _parse_allowed_origins() -> list[str]:
+    raw = os.environ.get("ALLOWED_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
 
 class Message(BaseModel):
     role: Literal["user", "assistant"]
@@ -64,9 +94,34 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+router = APIRouter()
+
+
+def create_app() -> FastAPI:
+    """App factory: docs exposure and CORS origins are read from env at
+    creation time (ENV, ALLOWED_ORIGINS), so tests can build a fresh app
+    under monkeypatched env without disturbing the module-level `app`."""
+    is_production = os.environ.get("ENV") == "production"
+    new_app = FastAPI(
+        lifespan=lifespan,
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
+    )
+    new_app.state.limiter = limiter
+    new_app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    new_app.add_middleware(BodySizeLimitMiddleware)
+    new_app.add_middleware(SecurityHeadersMiddleware)
+    new_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_parse_allowed_origins(),
+        allow_methods=["POST", "GET", "OPTIONS"],
+    )
+    new_app.include_router(router)
+    return new_app
+
+
+app = create_app()
 
 
 def get_agent(request: Request) -> Any:
@@ -161,7 +216,7 @@ async def _agent_event_stream(agent: Any, lc_messages: list[Any]):
             logger.exception("log_turn failed")
 
 
-@app.post("/chat")
+@router.post("/chat")
 @limiter.limit("5/minute")
 @limiter.limit("30/day")
 async def chat(request: Request, body: ChatRequest, agent: Any = Depends(get_agent)):
@@ -192,7 +247,7 @@ async def chat(request: Request, body: ChatRequest, agent: Any = Depends(get_age
     )
 
 
-@app.get("/health")
+@router.get("/health")
 async def health(supabase_client: Any = Depends(get_supabase)):
     try:
         await run_in_threadpool(
