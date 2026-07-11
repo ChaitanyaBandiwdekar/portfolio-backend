@@ -1,0 +1,27 @@
+name: Keep-alive ping
+
+# Prevents the Supabase free project from pausing after ~7 days of
+# inactivity by hitting the deployed backend's /health endpoint twice
+# a week (more resilient than once weekly).
+#
+# NOTE: scheduled workflows only run on the repo's default branch, and
+# GitHub disables cron schedules for repos with no activity in the last
+# 60 days — push a commit (or run this workflow manually) periodically
+# to keep it enabled.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1,4"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        env:
+          # TODO: set the deployed Render URL as a repo variable
+          # (Settings -> Secrets and variables -> Actions -> Variables ->
+          # HEALTH_URL), e.g. https://portfolio-backend.onrender.com
+          URL: ${{ vars.HEALTH_URL || 'https://REPLACE-ME.onrender.com' }}
+        run: curl -fsS "$URL/health"
