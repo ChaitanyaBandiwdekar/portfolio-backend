@@ -34,11 +34,11 @@ class _FakeAgent:
 def _reset_state():
     from app import guardrails as guardrails_module
 
-    guardrails_module.limiter.reset()
+    guardrails_module.reset_rate_limits()
     guardrails_module._daily_count = 0
     yield
     app.dependency_overrides.clear()
-    guardrails_module.limiter.reset()
+    guardrails_module.reset_rate_limits()
 
 
 @pytest.fixture
@@ -175,3 +175,63 @@ def test_docs_available_in_development(monkeypatch):
     resp = dev_client.get("/docs")
 
     assert resp.status_code == 200
+
+
+# --- HSTS in production --------------------------------------------------------
+
+
+def test_hsts_header_present_in_production(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    prod_app = main_module.create_app()
+    prod_app.dependency_overrides[get_supabase] = _fake_supabase
+    prod_client = TestClient(prod_app)
+
+    resp = prod_client.get("/health")
+
+    assert resp.headers["strict-transport-security"] == "max-age=31536000; includeSubDomains"
+
+
+def test_hsts_header_absent_outside_production(monkeypatch):
+    monkeypatch.setenv("ENV", "development")
+    dev_app = main_module.create_app()
+    dev_app.dependency_overrides[get_supabase] = _fake_supabase
+    dev_client = TestClient(dev_app)
+
+    resp = dev_client.get("/health")
+
+    assert "strict-transport-security" not in resp.headers
+
+
+# --- search_documents error path does not leak exception details --------------
+
+
+def test_search_documents_error_does_not_leak_exception_details(monkeypatch):
+    from app import agent as agent_module
+
+    def failing_retrieve(query):
+        raise RuntimeError("secret-db-detail")
+
+    monkeypatch.setattr(agent_module, "retrieve", failing_retrieve)
+
+    content, artifact = agent_module.search_documents.func("query")
+
+    assert "secret-db-detail" not in content
+    assert all("secret-db-detail" not in str(value) for value in artifact.values())
+    assert artifact["error"] == "RuntimeError"
+
+
+# --- format_chunks_for_model escapes titles ------------------------------------
+
+
+def test_format_chunks_for_model_escapes_title():
+    from app.agent import format_chunks_for_model
+    from app.retrieval import RetrievedChunk
+
+    chunk = RetrievedChunk(title='He said "hi" <script>', content="body", similarity=0.9)
+
+    rendered = format_chunks_for_model([chunk])
+
+    assert "&quot;" in rendered
+    assert "&lt;" in rendered
+    assert 'title="' in rendered
+    assert "<script>" not in rendered

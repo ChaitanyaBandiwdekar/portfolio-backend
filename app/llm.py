@@ -10,7 +10,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 
 _EMBED_MODEL = "models/gemini-embedding-001"
 _DIMS = 768
-_CHAT_MODEL = "gemini-2.5-flash"
+_CHAT_MODEL = os.environ.get("GEMINI_CHAT_MODEL", "gemini-flash-lite-latest")
 
 _doc_embedder: GoogleGenerativeAIEmbeddings | None = None
 _query_embedder: GoogleGenerativeAIEmbeddings | None = None

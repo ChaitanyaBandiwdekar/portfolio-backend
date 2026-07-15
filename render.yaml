@@ -26,6 +26,8 @@ services:
         value: "true"
       - key: LANGSMITH_PROJECT
         value: portfolio-backend
+      - key: GEMINI_CHAT_MODEL
+        value: gemini-flash-lite-latest
       # Comma-separated exact origins allowed to call the API. Set the real
       # deployed frontend origin(s) in the Render dashboard before going live;
       # left as sync: false (no default here) so CORS never accidentally

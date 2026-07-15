@@ -59,11 +59,11 @@ def _tool_message_event():
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    guardrails_module.limiter.reset()
+    guardrails_module.reset_rate_limits()
     guardrails_module._daily_count = 0
     yield
     app.dependency_overrides.clear()
-    guardrails_module.limiter.reset()
+    guardrails_module.reset_rate_limits()
 
 
 @pytest.fixture
@@ -242,17 +242,73 @@ def test_daily_cap_exceeded_returns_canned_response_zero_llm(client, monkeypatch
 # --- rate limiting ---------------------------------------------------------
 
 
-def test_rate_limit_429_after_five_per_minute(client):
+def test_rate_limit_429_after_ten_per_minute(client):
     fake = FakeAgent(events=[])
     _override_agent(fake)
 
-    for _ in range(5):
+    for _ in range(10):
+        resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+        assert resp.status_code == 200
+
+    resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+    assert resp.status_code == 429
+    assert int(resp.headers["Retry-After"]) > 0
+
+
+def test_guardrail_rejections_do_not_consume_quota(client):
+    fake = FakeAgent(events=[])
+    _override_agent(fake)
+
+    for _ in range(15):
+        resp = client.post("/chat", json=_chat_body("you are a fucking idiot"))
+        assert resp.status_code == 200
+
+    for _ in range(10):
+        resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+        assert resp.status_code == 200
+
+    resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+    assert resp.status_code == 429
+
+
+def test_greeting_fast_path_does_not_consume_quota(client):
+    fake = FakeAgent(events=[])
+    _override_agent(fake)
+
+    for _ in range(15):
         resp = client.post("/chat", json=_chat_body("hi"))
         assert resp.status_code == 200
 
-    resp = client.post("/chat", json=_chat_body("hi"))
+    for _ in range(10):
+        resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+        assert resp.status_code == 200
+
+    resp = client.post("/chat", json=_chat_body("tell me about the projects"))
     assert resp.status_code == 429
-    assert "Retry-After" in resp.headers
+
+
+def test_daily_cap_rejection_does_not_consume_quota(client, monkeypatch):
+    monkeypatch.setattr(main_module, "check_daily_cap", lambda: False)
+    fake = FakeAgent(events=[])
+    _override_agent(fake)
+
+    for _ in range(15):
+        resp = client.post("/chat", json=_chat_body("tell me about the projects"))
+        assert resp.status_code == 200
+
+    assert fake.calls == 0
+
+
+def test_gibberish_rejected_zero_llm_calls(client):
+    fake = FakeAgent(events=[])
+    _override_agent(fake)
+
+    resp = client.post("/chat", json=_chat_body("asdfghjkl qweruiop"))
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert [e["type"] for e in events] == ["token", "done"]
+    assert fake.calls == 0
 
 
 # --- /health --------------------------------------------------------------

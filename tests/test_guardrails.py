@@ -243,9 +243,103 @@ def test_client_ip_missing_everything_returns_unknown():
     assert guardrails.client_ip(req) == "unknown"
 
 
-# --- limiter wiring smoke test ---------------------------------------------
+# --- rate limits configuration ---------------------------------------------
 
 
-def test_limiter_is_configured_with_client_ip_key_func():
-    assert guardrails.limiter._headers_enabled is True
-    assert guardrails.limiter._key_func is guardrails.client_ip
+def test_rate_limits_configured_10_per_minute_30_per_day():
+    per_minute, per_day = guardrails.RATE_LIMITS
+    assert per_minute.amount == 10 and per_minute.GRANULARITY.name == "minute"
+    assert per_day.amount == 30 and per_day.GRANULARITY.name == "day"
+
+
+# --- rate limiter unit tests -------------------------------------------------
+
+
+@pytest.fixture
+def _small_rate_limits(monkeypatch):
+    from limits import parse
+
+    monkeypatch.setattr(guardrails, "RATE_LIMITS", [parse("2/minute"), parse("2/day")])
+    guardrails.reset_rate_limits()
+    yield
+    guardrails.reset_rate_limits()
+
+
+def test_rate_limit_allowed_when_fresh(_small_rate_limits):
+    status = guardrails.check_rate_limit("1.2.3.4")
+    assert status.allowed is True
+
+
+def test_rate_limit_blocked_after_consuming_quota(_small_rate_limits):
+    guardrails.consume_rate_limit("1.2.3.4")
+    guardrails.consume_rate_limit("1.2.3.4")
+
+    status = guardrails.check_rate_limit("1.2.3.4")
+
+    assert status.allowed is False
+
+
+def test_rate_limit_retry_after_is_positive(_small_rate_limits):
+    guardrails.consume_rate_limit("1.2.3.4")
+    guardrails.consume_rate_limit("1.2.3.4")
+
+    status = guardrails.check_rate_limit("1.2.3.4")
+
+    assert status.retry_after >= 1
+
+
+def test_reset_rate_limits_restores_quota(_small_rate_limits):
+    guardrails.consume_rate_limit("1.2.3.4")
+    guardrails.consume_rate_limit("1.2.3.4")
+    assert guardrails.check_rate_limit("1.2.3.4").allowed is False
+
+    guardrails.reset_rate_limits()
+
+    assert guardrails.check_rate_limit("1.2.3.4").allowed is True
+
+
+# --- gibberish gate ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "asdfghjkl qweruiop",
+        "aaaaaaaaaaaaaa",
+        "!!!!!!@@@@####$$$$",
+        "xjfkdls dkfjslkd fjsdlkf",
+        "qwrtpsdfghjkl",
+    ],
+)
+def test_gibberish_rejected_with_canned_response(text):
+    result = guardrails.check_input([_msg("user", text)])
+    assert result.ok is False
+    assert result.reason == "gibberish"
+    assert result.canned_response in guardrails.CANNED_GIBBERISH_RESPONSES
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "What stack?",
+        "pgvector?",
+        "C++?",
+        "k8s?",
+        "CI/CD experience?",
+        "tell me about https://github.com/foo/bar",
+        "What did Chaitanya build with FastAPI?",
+    ],
+)
+def test_legit_jargon_not_flagged_as_gibberish(text):
+    result = guardrails.check_input([_msg("user", text)])
+    assert result.ok is True
+
+
+def test_stale_gibberish_old_turn_clean_newest_passes():
+    history = [
+        _msg("user", "asdfghjkl qweruiop"),
+        _msg("assistant", "Could you rephrase that?"),
+        _msg("user", "what did he work on at Acme?"),
+    ]
+    result = guardrails.check_input(history)
+    assert result.ok is True

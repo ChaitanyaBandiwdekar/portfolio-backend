@@ -21,8 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -30,8 +28,10 @@ from app.agent import RECURSION_LIMIT, build_agent, log_turn
 from app.guardrails import (
     check_daily_cap,
     check_input,
+    check_rate_limit,
+    client_ip,
+    consume_rate_limit,
     is_greeting,
-    limiter,
 )
 from app.llm import get_chat_model
 from app.supabase_client import get_supabase_client
@@ -71,6 +71,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
+        if os.environ.get("ENV") == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 
@@ -112,8 +114,6 @@ def create_app() -> FastAPI:
         redoc_url=None if is_production else "/redoc",
         openapi_url=None if is_production else "/openapi.json",
     )
-    new_app.state.limiter = limiter
-    new_app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     new_app.add_middleware(BodySizeLimitMiddleware)
     new_app.add_middleware(SecurityHeadersMiddleware)
     new_app.add_middleware(
@@ -157,6 +157,18 @@ def _to_lc_messages(messages: list[dict[str, str]]) -> list[Any]:
     ]
 
 
+def _content_text(content: Any) -> str:
+    """Newer Gemini models stream content as a list of blocks (with
+    thought signatures), not a plain str — extract just the text."""
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
 def _accumulate_final_state(chunks: list[tuple[Any, dict]]) -> dict[str, Any]:
     """Best-effort reconstruction of an agent.invoke()-shaped result dict from
     streamed message chunks, so log_turn can be reused unchanged. Token
@@ -174,7 +186,7 @@ def _accumulate_final_state(chunks: list[tuple[Any, dict]]) -> dict[str, Any]:
             messages.append(chunk)
         elif metadata.get("langgraph_node") == "model":
             if chunk.content:
-                buffer += chunk.content
+                buffer += _content_text(chunk.content)
             if chunk.tool_calls:
                 tool_calls.extend(chunk.tool_calls)
     if buffer or tool_calls:
@@ -199,12 +211,13 @@ async def _agent_event_stream(agent: Any, lc_messages: list[Any]):
                 stream_mode="messages",
             ):
                 raw_chunks.append((chunk, metadata))
+                text = _content_text(chunk.content)
                 if (
                     metadata.get("langgraph_node") == "model"
-                    and chunk.content
+                    and text
                     and not chunk.tool_calls
                 ):
-                    yield _sse_event("token", chunk.content)
+                    yield _sse_event("token", text)
         yield _sse_event("done", "")
     except asyncio.CancelledError:
         raise
@@ -221,8 +234,6 @@ async def _agent_event_stream(agent: Any, lc_messages: list[Any]):
 
 
 @router.post("/chat")
-@limiter.limit("5/minute")
-@limiter.limit("30/day")
 async def chat(request: Request, body: ChatRequest, agent: Any = Depends(get_agent)):
     raw_messages = [m.model_dump() for m in body.messages]
 
@@ -240,10 +251,20 @@ async def chat(request: Request, body: ChatRequest, agent: Any = Depends(get_age
             _canned_stream(GREETING_RESPONSE), media_type="text/event-stream", headers=SSE_HEADERS
         )
 
+    rate_status = check_rate_limit(client_ip(request))
+    if not rate_status.allowed:
+        return JSONResponse(
+            {"error": "Rate limit exceeded"},
+            status_code=429,
+            headers={"Retry-After": str(rate_status.retry_after)},
+        )
+
     if not check_daily_cap():
         return StreamingResponse(
             _canned_stream(DAILY_CAP_RESPONSE), media_type="text/event-stream", headers=SSE_HEADERS
         )
+
+    consume_rate_limit(client_ip(request))
 
     lc_messages = _to_lc_messages(result.messages)
     return StreamingResponse(

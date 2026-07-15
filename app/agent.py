@@ -7,6 +7,7 @@ implementation notes ask for.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 from typing import Any
@@ -45,7 +46,9 @@ def format_chunks_for_model(chunks: list[RetrievedChunk]) -> str:
         return NO_RESULTS_MESSAGE
     parts = ["<search_results>"]
     for chunk in chunks:
-        parts.append(f'<result title="{chunk.title}">\n{chunk.content}\n</result>')
+        parts.append(
+            f'<result title="{html.escape(chunk.title, quote=True)}">\n{chunk.content}\n</result>'
+        )
     parts.append("</search_results>")
     return "\n".join(parts)
 
@@ -61,11 +64,11 @@ def search_documents(query: str) -> tuple[str, dict[str, Any]]:
         chunks = retrieve(query)
     except Exception as exc:  # never raise through the graph
         logger.exception("search_documents failed for query=%r", query)
-        return f"search failed ({exc}), you may retry once", {
+        return "search failed, you may retry once", {
             "query": query,
             "chunk_ids": [],
             "scores": [],
-            "error": str(exc),
+            "error": type(exc).__name__,
         }
 
     content = format_chunks_for_model(chunks)
